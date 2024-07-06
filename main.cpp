@@ -35,15 +35,11 @@ DWORD SetDebugPrivilege() {
 }
 
 
-void PrintError(const char* msg, DWORD err) {
-	if (err == -1) {
-		printf(" [-] %s.", msg);
-		return;
-	}
+void PrintError(DWORD err) {
 	wchar_t* msgBuf = nullptr;
 	FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (wchar_t*)&msgBuf, 0, NULL);
 	_bstr_t b(msgBuf); const char* c = b;
-	printf("[-] %s. err: %d %s", msg, err, c);
+	printf("[-] err: %d %s", err, c);
 	LocalFree(msgBuf);
 }
 
@@ -56,7 +52,7 @@ DWORD GetPidByName(const wchar_t* processName) {
 		pe32.dwSize = sizeof(PROCESSENTRY32);
 		if (Process32First(hProcessSnap, &pe32)) {
 			do {
-				// exeファイル名が引数のプロセス名を一致するかどうか
+				// exeファイル名が引数のプロセス名と一致するかどうか
 				if (_tcscmp(pe32.szExeFile, processName) == 0) {
 					processId = pe32.th32ProcessID;
 					break;
@@ -78,12 +74,14 @@ HANDLE DuplicateProcessToken(DWORD pid, TOKEN_TYPE tokenType) {
 	if (hToken == INVALID_HANDLE_VALUE) {
 		return INVALID_HANDLE_VALUE;
 	}
-
+	//https://learn.microsoft.com/ja-jp/windows-hardware/drivers/ddi/wdm/ne-wdm-_security_impersonation_level
+	//リモートではないので
 	SECURITY_IMPERSONATION_LEVEL seImpersonateLevel = SecurityImpersonation;
 	HANDLE hNewToken = {};
-	// duplicate the token
+	//https://learn.microsoft.com/ja-jp/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex
+	// アクセストークンの複製
 	if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, seImpersonateLevel, tokenType, &hNewToken)) {
-		PrintError("DuplicateTokenEx()", GetLastError());
+		PrintError(GetLastError());
 		CloseHandle(hToken);
 		return INVALID_HANDLE_VALUE;
 	}
@@ -94,9 +92,16 @@ HANDLE DuplicateProcessToken(DWORD pid, TOKEN_TYPE tokenType) {
 int wmain() {
 	bool success = SetDebugPrivilege();
 	if (!success) {
-		PrintError("SetDebugPrivilege", GetLastError());
+		// 管理者権限で実行されていない
+		PrintError(GetLastError());
 	}
 	DWORD pid = GetPidByName(L"winlogon.exe");
 	if (pid == 0) return -1;
+	// winlogon.exeはTruestedInstallerで起動している。
+	// そのプロセスIDをキーにアクセストークンを取得し複製する。
+	// TOKEN_TYPEはTokenPrimaryかTokenImpersonationどちらでもよいはず
+	// 偽装トークンで十分なはずなので、TokenImpersonation
 	HANDLE hImpToken = DuplicateProcessToken(pid, TOKEN_TYPE::TokenImpersonation);
+	// 複製したトークンをスポーンさせるプロセスに割り当てる。
+
 }

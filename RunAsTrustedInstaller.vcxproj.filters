@@ -15,8 +15,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="RunAsTrustedInstaller.cpp">
+    <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\git\Run-As-TrustedInstaller\.editorconfig" />
+    <None Include="README.md" />
+    <None Include=".gitignore" />
   </ItemGroup>
 </Project>

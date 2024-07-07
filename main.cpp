@@ -14,7 +14,7 @@ DWORD SetDebugPrivilege() {
 	HANDLE currentProcess = GetCurrentProcess();
 	HANDLE accessToken;
 	if (!OpenProcessToken(currentProcess, TOKEN_ADJUST_PRIVILEGES, &accessToken)) {
-		printf("ユーザーにTOKEN_ADJUST_PRIVILEGESが付与されていません。管理者権限で実行してください。");
+		printf("please try again as administrator");
 		return false;
 	}
 	LUID luid;
@@ -37,7 +37,7 @@ DWORD SetDebugPrivilege() {
 /*
 * GetLastError()の内容をコンソール出力する。
 */
-void Error() {
+void PrintLastError() {
 	auto err = GetLastError();
 	wchar_t* msgBuf = nullptr;
 	FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (wchar_t*)&msgBuf, 0, NULL);
@@ -80,7 +80,7 @@ HANDLE GetProcessToken(DWORD pid) {
 		hCurrentProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, TRUE, pid);
 		if (hCurrentProcess == NULL) {
 			// 失敗した場合
-			Error();
+			PrintLastError();
 			return INVALID_HANDLE_VALUE;
 		}
 	}
@@ -91,7 +91,7 @@ HANDLE GetProcessToken(DWORD pid) {
 	//	https://learn.microsoft.com/ja-jp/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken#parameters
 	bool success = OpenProcessToken(hCurrentProcess, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY, &hToken);
 	if (!success) {
-		Error();
+		PrintLastError();
 		return INVALID_HANDLE_VALUE;
 	}
 	CloseHandle(hCurrentProcess);
@@ -114,7 +114,7 @@ HANDLE DuplicateProcessToken(DWORD pid, TOKEN_TYPE tokenType) {
 	//https://learn.microsoft.com/ja-jp/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex
 	// アクセストークンの複製
 	if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, seImpersonateLevel, tokenType, &hNewToken)) {
-		Error();
+		PrintLastError();
 		CloseHandle(hToken);
 		return INVALID_HANDLE_VALUE;
 	}
@@ -122,38 +122,100 @@ HANDLE DuplicateProcessToken(DWORD pid, TOKEN_TYPE tokenType) {
 	return hNewToken;
 }
 
-int wmain() {
+
+/*
+* pidをキーにプロセスを停止する。
+*/
+bool TerminateProcessByPid(const DWORD pid) {
+	if (pid == 0) {
+		return false;
+	}
+	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+	if (hProcess == INVALID_HANDLE_VALUE) {
+		return false;
+	}
+	if (!TerminateProcess(hProcess, 1)) {
+		PrintLastError();
+		return false;
+	}
+	return true;
+}
+
+/*
+* main.
+* - Systemで起動しているwinlogon.exeからアクセストークンを偽装トークンとして作成
+* - 複製した偽装トークンを現在のプロセスに割り当てる
+* - Systemに昇格したので、TrustedInstaller Serviceを起動する。
+* - 起動したTrustedInstaller Serviceからアクセストークンを複製
+* - 複製したアクセストークン(TrustedInstaller権限)を付与してcmd.exeを起動
+*/
+int main() {
+	const LPCWSTR targetExecutable = L"C:\\Windows\\System32\\cmd.exe";
 	bool success = SetDebugPrivilege();
 	if (!success) {
 		// 管理者権限で実行されていない
-		Error();
+		PrintLastError();
 	}
 	DWORD pid = GetPidByName(L"winlogon.exe");
 	if (pid == 0) return -1;
 	//winlogon.exeのキーにアクセストークンを取得し偽装トークンとして複製する。
 	HANDLE hImpersonationToken = DuplicateProcessToken(pid, TOKEN_TYPE::TokenImpersonation);
 	if (hImpersonationToken == INVALID_HANDLE_VALUE) {
-		printf("winlogon.exeのアクセストークンの複製に失敗しました。");
+		printf("Faild to duplicate access token for winlogon.exe");
 		return -1;
 	}
 	// https://learn.microsoft.com/ja-jp/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentthread
 	HANDLE hCurrentThread = GetCurrentThread();
 	// 複製した偽装トークンを現在のスレッドに割り当てる。
-	bool success = SetThreadToken(&hCurrentThread, hImpersonationToken);
+	success = SetThreadToken(&hCurrentThread, hImpersonationToken);
 	if (!success) {
-		Error();
+		PrintLastError();
 		return -1;
 	}
 	CloseHandle(hCurrentThread);
 	CloseHandle(hImpersonationToken);
 	//https://learn.microsoft.com/ja-jp/windows/win32/api/winsvc/nf-winsvc-openservicew
 	//https://learn.microsoft.com/ja-jp/windows/win32/api/winsvc/nf-winsvc-openscmanagerw
-	SC_HANDLE hService = OpenServiceW(OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS), L"trustedinstaller", MAXIMUM_ALLOWED);
-	if (hService == NULL) {
+	SC_HANDLE hTrustedInstallerService = OpenServiceW(OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS), L"trustedinstaller", MAXIMUM_ALLOWED);
+	if (hTrustedInstallerService == NULL) {
 		// trustedinstaller serviceのハンドルを取得できなかった。
-		Error();
+		PrintLastError();
 		return -1;
 	}
-
-
+	SERVICE_STATUS_PROCESS ssp = {};
+	DWORD pcbBytesNeeded;
+	//https://learn.microsoft.com/ja-jp/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex
+	if (!QueryServiceStatusEx(hTrustedInstallerService, SC_STATUS_PROCESS_INFO, (BYTE*)&ssp, sizeof(ssp), &pcbBytesNeeded)) {
+		PrintLastError();
+		return -1;
+	}
+	if (ssp.dwCurrentState != SERVICE_RUNNING) {
+		// trustedinstaller serviceが動作していなければ、立ち上げる。
+		if (!StartService(hTrustedInstallerService, 0, NULL)) {
+			PrintLastError();
+			return -1;
+		}
+	}
+	CloseServiceHandle(hTrustedInstallerService);
+	HANDLE hTruestedInstallerToken = DuplicateProcessToken(ssp.dwProcessId, TOKEN_TYPE::TokenPrimary);
+	if (hTruestedInstallerToken == INVALID_HANDLE_VALUE) {
+		printf("Faild to duplicate access token for TrustedInstaller");
+		return -1;
+	}
+	if (!TerminateProcessByPid(ssp.dwProcessId)) {
+		printf("Faild to terminate TrustedInstaller-service");
+	}
+	if (!TerminateProcessByPid(GetPidByName(L"TrustedInstaller.exe"))) {
+		printf("Faild to terminate TrustedInstaller.exe");
+	}
+	STARTUPINFO si = {};
+	PROCESS_INFORMATION pi = {};
+	//https://learn.microsoft.com/ja-jp/windows/win32/api/winbase/nf-winbase-createprocesswithtokenw
+	success = CreateProcessWithTokenW(hTruestedInstallerToken, LOGON_NETCREDENTIALS_ONLY, targetExecutable, NULL, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi);
+	if (!success) {
+		PrintLastError();
+		return -1;
+	}
+	CloseHandle(hTruestedInstallerToken);
+	return 0;
 }

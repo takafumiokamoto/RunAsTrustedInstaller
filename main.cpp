@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <string>
 #include <comdef.h>
 #include <tchar.h>
@@ -10,7 +10,7 @@
 * 処理が失敗した場合はgetLastError()でエラー内容が取得できる。
 *
 */
-DWORD SetDebugPrivilege() {
+bool SetDebugPrivilege() {
 	HANDLE currentProcess = GetCurrentProcess();
 	HANDLE accessToken;
 	if (!OpenProcessToken(currentProcess, TOKEN_ADJUST_PRIVILEGES, &accessToken)) {
@@ -21,6 +21,7 @@ DWORD SetDebugPrivilege() {
 	// https://learn.microsoft.com/ja-jp/windows/win32/api/winbase/nf-winbase-lookupprivilegevaluew
 	// SeDebugPrivilegeのLUIDを取得
 	if (!LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &luid)) {
+		printf("Faild to obtain LUID");
 		// LUIDの取得に失敗
 		return false;
 	}
@@ -30,6 +31,7 @@ DWORD SetDebugPrivilege() {
 	tp.Privileges[0].Luid = luid;
 	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 	if (!AdjustTokenPrivileges(accessToken, FALSE, &tp, NULL, (PTOKEN_PRIVILEGES)NULL, (PDWORD)NULL)) {
+		printf("Faild to adjust token privileges");
 		return false;
 	}
 }
@@ -155,6 +157,7 @@ int main() {
 	if (!success) {
 		// 管理者権限で実行されていない
 		PrintLastError();
+		return -1;
 	}
 	DWORD pid = GetPidByName(L"winlogon.exe");
 	if (pid == 0) return -1;
@@ -195,6 +198,17 @@ int main() {
 			PrintLastError();
 			return -1;
 		}
+		// pidの更新
+		if (!QueryServiceStatusEx(hTrustedInstallerService, SC_STATUS_PROCESS_INFO, (BYTE*)&ssp, sizeof(ssp), &pcbBytesNeeded)) {
+			PrintLastError();
+			return -1;
+		}
+		// 起動しているか再度チェックすると毎回コケるのはなぜ？
+		//if (ssp.dwCurrentState != SERVICE_RUNNING) {
+		//	// 起動に失敗していればエラー
+		//	printf("Faild to start TrustedInstaller service");
+		//	return -1;
+		//}
 	}
 	CloseServiceHandle(hTrustedInstallerService);
 	HANDLE hTruestedInstallerToken = DuplicateProcessToken(ssp.dwProcessId, TOKEN_TYPE::TokenPrimary);
@@ -202,11 +216,10 @@ int main() {
 		printf("Faild to duplicate access token for TrustedInstaller");
 		return -1;
 	}
+	// TrustedInstaller.exeも一緒に停止する。
 	if (!TerminateProcessByPid(ssp.dwProcessId)) {
-		printf("Faild to terminate TrustedInstaller-service");
-	}
-	if (!TerminateProcessByPid(GetPidByName(L"TrustedInstaller.exe"))) {
-		printf("Faild to terminate TrustedInstaller.exe");
+		printf("Faild to terminate TrustedInstaller-service pid:%d", pid);
+		return -1;
 	}
 	STARTUPINFO si = {};
 	PROCESS_INFORMATION pi = {};
@@ -216,6 +229,9 @@ int main() {
 		PrintLastError();
 		return -1;
 	}
-	CloseHandle(hTruestedInstallerToken);
+	if (!CloseHandle(hTruestedInstallerToken)) {
+		PrintLastError();
+		return -1;
+	}
 	return 0;
 }

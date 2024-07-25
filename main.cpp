@@ -79,7 +79,7 @@ HANDLE GetProcessToken(DWORD pid) {
 	HANDLE hCurrentProcess;
 	if (pid != 0) {
 		// pidに対応するプロセスのハンドルを取得
-		hCurrentProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, TRUE, pid);
+		hCurrentProcess = OpenProcess(PROCESS_QUERY_INFORMATION, TRUE, pid);
 		if (hCurrentProcess == NULL) {
 			// 失敗した場合
 			PrintLastError();
@@ -146,10 +146,10 @@ bool TerminateProcessByPid(const DWORD pid) {
 /*
 * main.
 * - Systemで起動しているwinlogon.exeからアクセストークンを偽装トークンとして作成
-* - 複製した偽装トークンを現在のプロセスに割り当てる
+* - 複製した偽装トークンを現在のスレッドに割り当てる
 * - Systemに昇格したので、TrustedInstaller Serviceを起動する。
-* - 起動したTrustedInstaller Serviceからアクセストークンを複製
-* - 複製したアクセストークン(TrustedInstaller権限)を付与してcmd.exeを起動
+* - 起動したTrustedInstaller Serviceからプライマリアクセストークンを複製
+* - 複製したプライマリアクセストークン(TrustedInstaller権限)を付与してcmd.exeを起動
 */
 int main() {
 	const LPCWSTR targetExecutable = L"C:\\Windows\\System32\\cmd.exe";
